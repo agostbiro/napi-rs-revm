@@ -1,0 +1,16 @@
+[package]
+name = "napi-rs-revm"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3.0.0", features = ["napi6"] }
+napi-derive = "3.0.0"
+napi-rs-revm-core = { path = "../core" }
+
+[build-dependencies]
+napi-build = "2"

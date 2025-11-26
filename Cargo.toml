@@ -1,0 +1,12 @@
+[workspace]
+members = ["crates/core", "crates/cli", "crates/napi"]
+resolver = "2"
+
+[workspace.package]
+authors = ["LongYinan <lynweklm@gmail.com>"]
+edition = "2021"
+version = "0.1.0"
+
+[profile.release]
+lto = true
+strip = "symbols"
