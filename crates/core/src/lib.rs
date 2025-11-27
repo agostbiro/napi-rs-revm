@@ -1,5 +1,6 @@
 #![deny(clippy::all)]
 
+use eyre::{eyre, Result};
 use revm::{
     bytecode::Bytecode,
     context::{Context, TxEnv},
@@ -8,27 +9,30 @@ use revm::{
     primitives::{address, keccak256, Address, Bytes, TxKind, U256},
     state::AccountInfo,
 };
+use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
-use eyre::{eyre, Result};
-use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Artifact {
-    deployed_bytecode: ArtifactCode
+    deployed_bytecode: ArtifactCode,
 }
 
 #[derive(Debug, Deserialize)]
 struct ArtifactCode {
-    object: String
+    object: String,
 }
 
 fn load_test_contract_deployed_code(test_artifact_path: &Path) -> Result<Vec<u8>> {
     let artifact_file = fs::File::open(test_artifact_path)?;
     let artifact: Artifact = serde_json::from_reader(artifact_file)?;
-    let hex_str = artifact.deployed_bytecode.object.strip_prefix("0x").unwrap_or(&artifact.deployed_bytecode.object);
+    let hex_str = artifact
+        .deployed_bytecode
+        .object
+        .strip_prefix("0x")
+        .unwrap_or(&artifact.deployed_bytecode.object);
     let bytecode_bytes = hex::decode(hex_str)?;
     Ok(bytecode_bytes)
 }
@@ -60,7 +64,8 @@ fn build_tx(contract_address: Address, selector: Bytes, caller: Address) -> Resu
         .kind(TxKind::Call(contract_address))
         .data(selector)
         .gas_limit(30_000_000)
-        .build().map_err(|err| eyre!("{:?}", err))?;
+        .build()
+        .map_err(|err| eyre!("{:?}", err))?;
 
     Ok(test_tx)
 }

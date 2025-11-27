@@ -572,4 +572,5 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
-module.exports.executeTest = nativeBinding.executeTest
+module.exports.executeTestAsync = nativeBinding.executeTestAsync
+module.exports.executeTestSync = nativeBinding.executeTestSync

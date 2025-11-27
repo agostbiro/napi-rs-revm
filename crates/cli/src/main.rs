@@ -12,7 +12,11 @@ struct Args {
     test_artifact_path: PathBuf,
 
     /// Name of the test function to execute
-    #[arg(short = 'n', long, default_value = "test_Avg_OneOperandEvenTheOtherOdd()")]
+    #[arg(
+        short = 'n',
+        long,
+        default_value = "test_Avg_OneOperandEvenTheOtherOdd()"
+    )]
     test_name: String,
 }
 

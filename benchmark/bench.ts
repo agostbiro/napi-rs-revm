@@ -1,6 +1,6 @@
 import { ArgumentParser } from "argparse";
 import child_process from "child_process";
-import { executeTest } from '../index.js'
+import { executeTestSync, executeTestAsync } from '../index.js'
 
 const runs = 27;
 const artifactPath = "contracts/Avg_Unit_Test.json";
@@ -8,13 +8,19 @@ const testName = "test_Avg_OneOperandEvenTheOtherOdd()";
 
 interface ParsedArguments {
   command:
-    | "execute-test"
+    | "execute-test-sync"
+    | "execute-test-async"
     | "benchmark";
   count: number;
 }
 
-function runExecuteTest() {
-  const elapsed = executeTest(artifactPath, testName);
+async function runExecuteTestAsync() {
+  const elapsed = await executeTestAsync(artifactPath, testName);
+  console.log(elapsed);
+}
+
+function runExecuteTestSync() {
+  const elapsed = executeTestSync(artifactPath, testName);
   console.log(elapsed);
 }
 
@@ -44,7 +50,7 @@ function runInSubprocess(command: string, args: string[]) {
   return Number(result);
 }
 
-function runExecuteTestInSubprocess() {
+function runExecuteTestSyncInSubprocess() {
   const args = [
     "--noconcurrent_sweeping",
     "--noconcurrent_recompilation",
@@ -52,7 +58,21 @@ function runExecuteTestInSubprocess() {
     "--import",
     "tsx",
     "benchmark/bench.ts",
-    "execute-test",
+    "execute-test-sync",
+  ];
+
+  return runInSubprocess(process.argv[0], args);
+}
+
+function runExecuteTestAsyncInSubprocess() {
+  const args = [
+    "--noconcurrent_sweeping",
+    "--noconcurrent_recompilation",
+    "--max-old-space-size=28000",
+    "--import",
+    "tsx",
+    "benchmark/bench.ts",
+    "execute-test-async",
   ];
 
   return runInSubprocess(process.argv[0], args);
@@ -103,15 +123,25 @@ function reportStatistics(stats: { runs: number; mean: number; median: number; m
 }
 
 function runBenchmark(runs: number) {
-  const nodeTimes = [];
+  const nodeSyncTimes = [];
   for (let i = 0; i < runs; i++) {
-    const elapsed = runExecuteTestInSubprocess();
-    nodeTimes.push(elapsed);
+    const elapsed = runExecuteTestSyncInSubprocess();
+    nodeSyncTimes.push(elapsed);
   }
 
-  console.log("=== Node Stats ===")
-  const nodeStats = calculateStatistics(nodeTimes);
-  reportStatistics(nodeStats);
+  console.log("=== Node Sync Stats ===")
+  const nodeSyncStats = calculateStatistics(nodeSyncTimes);
+  reportStatistics(nodeSyncStats);
+
+  const nodeAsyncTimes = [];
+  for (let i = 0; i < runs; i++) {
+    const elapsed = runExecuteTestAsyncInSubprocess();
+    nodeAsyncTimes.push(elapsed);
+  }
+
+  console.log("=== Node Async Stats ===")
+  const nodeAsyncStats = calculateStatistics(nodeAsyncTimes);
+  reportStatistics(nodeAsyncStats);
 
   const rustTimes = []
   for (let i = 0; i < runs; i++) {
@@ -124,30 +154,55 @@ function runBenchmark(runs: number) {
   reportStatistics(rustStats);
 
   console.log("=== Comparison ===")
-  console.log("Node/Rust median:", Math.round(10000 * nodeStats.median / rustStats.median) / 100, "%")
+  console.log("Node Sync/Rust median:", Math.round(10000 * nodeSyncStats.median / rustStats.median) / 100, "%")
+  console.log("Node Async/Rust median:", Math.round(10000 * nodeAsyncStats.median / rustStats.median) / 100, "%")
 }
 
-const parser = new ArgumentParser({
-  description: "Benchmark runner",
-});
-parser.add_argument("command", {
-  choices: [
-    "execute-test",
-    "benchmark"
-  ],
-});
-parser.add_argument("-c", "--count", {
-  type: "int",
-  default: 27,
-  help: "Number of samples",
-});
+async function main() {
+  const parser = new ArgumentParser({
+    description: "Benchmark runner",
+  });
+  parser.add_argument("command", {
+    choices: [
+      "execute-test-sync",
+      "execute-test-async",
+      "benchmark"
+    ],
+  });
+  parser.add_argument("-c", "--count", {
+    type: "int",
+    default: 27,
+    help: "Number of samples",
+  });
 
-const args: ParsedArguments = parser.parse_args();
+  const args: ParsedArguments = parser.parse_args();
 
-if (args.command === "execute-test") {
-  runExecuteTest()
-} else if (args.command === "benchmark") {
-  runBenchmark(args.count)
-} else {
-  throw new Error(`Unknown command: ${args.command}`)
+  if (args.command === "execute-test-sync") {
+    runExecuteTestSync()
+  } else if (args.command === "execute-test-async") {
+      await runExecuteTestAsync()
+  } else if (args.command === "benchmark") {
+    runBenchmark(args.count)
+  } else {
+    throw new Error(`Unknown command: ${args.command}`)
+  }
+
+  return true
 }
+
+async function flushStdout() {
+  return new Promise((resolve) => {
+    process.stdout.write("", resolve);
+  });
+}
+
+main()
+  .then(async (success) => {
+    await flushStdout();
+    process.exit(success ? 0 : 1);
+  })
+  .catch(async (error) => {
+    console.error(error);
+    await flushStdout();
+    process.exit(1);
+  });
