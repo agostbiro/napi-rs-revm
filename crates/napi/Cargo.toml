@@ -8,9 +8,10 @@ edition.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "3.0.0", features = ["napi6"] }
+napi = { version = "3.0.0", features = ["async", "error_anyhow", "napi8", "serde-json"] }
 napi-derive = "3.0.0"
 napi-rs-revm-core = { path = "../core" }
+tokio = "1.48.0"
 
 [build-dependencies]
 napi-build = "2"
