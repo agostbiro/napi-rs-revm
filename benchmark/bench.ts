@@ -110,7 +110,8 @@ function runBenchmark(runs: number) {
   }
 
   console.log("=== Node Stats ===")
-  reportStatistics(calculateStatistics(nodeTimes));
+  const nodeStats = calculateStatistics(nodeTimes);
+  reportStatistics(nodeStats);
 
   const rustTimes = []
   for (let i = 0; i < runs; i++) {
@@ -119,7 +120,11 @@ function runBenchmark(runs: number) {
   }
 
   console.log("=== Rust Stats ===")
-  reportStatistics(calculateStatistics(rustTimes));
+  const rustStats = calculateStatistics(rustTimes);
+  reportStatistics(rustStats);
+
+  console.log("=== Comparison ===")
+  console.log("Node/Rust median:", Math.round(10000 * nodeStats.median / rustStats.median) / 100, "%")
 }
 
 const parser = new ArgumentParser({
