@@ -1,30 +1,22 @@
 import { ArgumentParser } from "argparse";
 import child_process from "child_process";
-import { executeTestSync, executeTestAsync } from '../index.js'
+import { executeTestSync, executeTestAsync, TestResult } from '../index.js'
 
 const runs = 27;
 const artifactPath = "contracts/Avg_Unit_Test.json";
 const testName = "test_Avg_OneOperandEvenTheOtherOdd()";
 
-interface ParsedArguments {
-  command:
-    | "execute-test-sync"
-    | "execute-test-async"
-    | "benchmark";
-  count: number;
+async function runExecuteTestAsync(cacheHitRatio: boolean) {
+  const result = await executeTestAsync(artifactPath, testName, cacheHitRatio);
+  console.log(JSON.stringify(result));
 }
 
-async function runExecuteTestAsync() {
-  const elapsed = await executeTestAsync(artifactPath, testName);
-  console.log(elapsed);
+function runExecuteTestSync(cacheHitRatio: boolean) {
+  const result = executeTestSync(artifactPath, testName, cacheHitRatio);
+  console.log(JSON.stringify(result));
 }
 
-function runExecuteTestSync() {
-  const elapsed = executeTestSync(artifactPath, testName);
-  console.log(elapsed);
-}
-
-function runInSubprocess(command: string, args: string[]) {
+function runInSubprocess(command: string, args: string[]): TestResult {
   const processResult = child_process.spawnSync(command, args, {
     shell: true,
     timeout: 60 * 60 * 1000, // 1 hour timeout
@@ -43,55 +35,60 @@ function runInSubprocess(command: string, args: string[]) {
 
   let result = processResult.stdout.trim();
 
-  if (result.endsWith("n")) {
-    result = result.slice(0, result.length - 1);
+  return JSON.parse(result);
+}
+
+interface TestOptions {
+  cacheHitRatio: boolean;
+  async: boolean
+}
+
+function runNodeTest(options: TestOptions) {
+  const args = [
+    "--noconcurrent_sweeping",
+    "--noconcurrent_recompilation",
+    "--max-old-space-size=28000",
+    "--import",
+    "tsx",
+    "benchmark/bench.ts",
+  ];
+
+  if (options.async) {
+    args.push("execute-test-async");
+  } else {
+    args.push("execute-test-sync");
   }
 
-  return Number(result);
-}
-
-function runExecuteTestSyncInSubprocess() {
-  const args = [
-    "--noconcurrent_sweeping",
-    "--noconcurrent_recompilation",
-    "--max-old-space-size=28000",
-    "--import",
-    "tsx",
-    "benchmark/bench.ts",
-    "execute-test-sync",
-  ];
+  if (options.cacheHitRatio) {
+    args.push("--cache-hit-ratio")
+  }
 
   return runInSubprocess(process.argv[0], args);
 }
 
-function runExecuteTestAsyncInSubprocess() {
+function runCargoInSubProcess(options: TestOptions) {
   const args = [
-    "--noconcurrent_sweeping",
-    "--noconcurrent_recompilation",
-    "--max-old-space-size=28000",
-    "--import",
-    "tsx",
-    "benchmark/bench.ts",
-    "execute-test-async",
+    "run", "--quiet", "--bin", "execute_test", "--release", "--"
   ];
 
-  return runInSubprocess(process.argv[0], args);
-}
+  if (options.async) {
+    args.push("execute-test-async");
+  } else {
+    args.push("execute-test-sync");
+  }
 
-function runCargoInSubProcess(sync: boolean) {
-  const command = `execute-test-${sync ? "" : "a"}sync`
-  const args = [
-    "run", "--quiet", "--bin", "execute_test", "--release", "--", command
-  ];
+  if (options.cacheHitRatio) {
+    args.push("--cache_hit_ratio")
+  }
 
   return runInSubprocess("cargo", args);
 }
 
-function calculateStatistics(times: number[]) {
+function calculateStatistics(values: number[]) {
   // Calculate statistics
-  const sum = times.reduce((a, b) => a + b, 0);
+  const sum = values.reduce((a, b) => a + b, 0);
   const mean = sum / runs;
-  const sorted = times.sort((a, b) => a - b);
+  const sorted = values.sort((a, b) => a - b);
   const median = runs % 2 === 0
     ? (sorted[runs / 2 - 1] + sorted[runs / 2]) / 2
     : sorted[Math.floor(runs / 2)];
@@ -99,7 +96,7 @@ function calculateStatistics(times: number[]) {
   const max = sorted[sorted.length - 1];
 
   // Calculate standard deviation
-  const variance = times.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / runs;
+  const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / runs;
   const stdDev = Math.sqrt(variance);
 
   return {
@@ -123,51 +120,92 @@ function reportStatistics(stats: { runs: number; mean: number; median: number; m
   console.log(`Std Dev:   ${(stdDev / 1_000_000).toFixed(3)} ms (${stdDev.toFixed(0)} ns)`)
 }
 
-function runBenchmark(runs: number) {
-  const nodeSyncTimes = [];
-  for (let i = 0; i < runs; i++) {
-    const elapsed = runExecuteTestSyncInSubprocess();
-    nodeSyncTimes.push(elapsed);
+function executeTimes(count: number, options: TestOptions, func: (options: TestOptions) => TestResult): number[] {
+  const values = [];
+  for (let i = 0; i < count; i++) {
+    const testResult = func(options);
+    if (options.cacheHitRatio) {
+      values.push(testResult.cacheHitRatio);
+    } else {
+      values.push(testResult.durationNs);
+    }
   }
+  return values
+}
 
-  console.log("=== Node Sync Stats ===")
+function runBenchmark(runs: number, cacheHitRatio: boolean) {
+  const nodeSyncTimes = executeTimes(runs, {cacheHitRatio: false, async: false}, runNodeTest)
+
+  console.log("=== Node Sync Duration Stats ===")
   const nodeSyncStats = calculateStatistics(nodeSyncTimes);
   reportStatistics(nodeSyncStats);
 
-  const nodeAsyncTimes = [];
-  for (let i = 0; i < runs; i++) {
-    const elapsed = runExecuteTestAsyncInSubprocess();
-    nodeAsyncTimes.push(elapsed);
-  }
+  const nodeAsyncTimes = executeTimes(runs, {cacheHitRatio: false, async: true}, runNodeTest)
 
-  console.log("=== Node Async Stats ===")
+  console.log("=== Node Async Duration Stats ===")
   const nodeAsyncStats = calculateStatistics(nodeAsyncTimes);
   reportStatistics(nodeAsyncStats);
 
-  const rustSyncTimes = []
-  for (let i = 0; i < runs; i++) {
-    const elapsed = runCargoInSubProcess(/* sync */ true);
-    rustSyncTimes.push(elapsed);
-  }
+  const rustSyncTimes = executeTimes(runs, {cacheHitRatio: false, async: false}, runCargoInSubProcess)
 
-  console.log("=== Rust Sync Stats ===")
+  console.log("=== Rust Sync Duration Stats ===")
   const rustSyncStats = calculateStatistics(rustSyncTimes);
   reportStatistics(rustSyncStats);
 
-  const rustAsyncTimes = []
-  for (let i = 0; i < runs; i++) {
-    const elapsed = runCargoInSubProcess(/* sync */ false);
-    rustAsyncTimes.push(elapsed);
-  }
+  const rustAsyncTimes = executeTimes(runs, {cacheHitRatio: false, async: true}, runCargoInSubProcess)
 
-  console.log("=== Rust Async Stats ===")
+  console.log("=== Rust Async Duration Stats ===")
   const rustAsyncStats = calculateStatistics(rustAsyncTimes);
   reportStatistics(rustAsyncStats);
 
-  console.log("=== Comparison ===")
+  console.log("=== Duration Comparison ===")
   console.log("Node Sync/Rust Sync median:", Math.round(10000 * nodeSyncStats.median / rustSyncStats.median) / 100, "%")
   console.log("Node Async/Rust Sync median:", Math.round(10000 * nodeAsyncStats.median / rustSyncStats.median) / 100, "%")
   console.log("Rust Async/Rust Sync median:", Math.round(10000 * rustAsyncStats.median / rustSyncStats.median) / 100, "%")
+
+  if (cacheHitRatio) {
+    runCacheHitRatioBenchmark(runs)
+  }
+}
+
+function runCacheHitRatioBenchmark(runs: number) {
+  const nodeSyncTimes = executeTimes(runs, {cacheHitRatio: true, async: false}, runNodeTest)
+
+  console.log("=== Node Sync Cache Hit Ratio Stats ===")
+  const nodeSyncStats = calculateStatistics(nodeSyncTimes);
+  reportStatistics(nodeSyncStats);
+
+  const nodeAsyncTimes = executeTimes(runs, {cacheHitRatio: true, async: true}, runNodeTest)
+
+  console.log("=== Node Async Cache Hit Ratio Stats ===")
+  const nodeAsyncStats = calculateStatistics(nodeAsyncTimes);
+  reportStatistics(nodeAsyncStats);
+
+  const rustSyncTimes = executeTimes(runs, {cacheHitRatio: true, async: false}, runCargoInSubProcess)
+
+  console.log("=== Rust Sync Cache Hit Ratio Stats ===")
+  const rustSyncStats = calculateStatistics(rustSyncTimes);
+  reportStatistics(rustSyncStats);
+
+  const rustAsyncTimes = executeTimes(runs, {cacheHitRatio: true, async: true}, runCargoInSubProcess)
+
+  console.log("=== Rust Async Cache Hit Ratio Stats ===")
+  const rustAsyncStats = calculateStatistics(rustAsyncTimes);
+  reportStatistics(rustAsyncStats);
+
+  console.log("=== Cache Hit Ratio Comparison ===")
+  console.log("Node Sync/Rust Sync median:", Math.round(10000 * nodeSyncStats.median / rustSyncStats.median) / 100, "%")
+  console.log("Node Async/Rust Sync median:", Math.round(10000 * nodeAsyncStats.median / rustSyncStats.median) / 100, "%")
+  console.log("Rust Async/Rust Sync median:", Math.round(10000 * rustAsyncStats.median / rustSyncStats.median) / 100, "%")
+}
+
+interface ParsedArguments {
+  command:
+    | "execute-test-sync"
+    | "execute-test-async"
+    | "benchmark";
+  count: number;
+  cache_hit_ratio: boolean;
 }
 
 async function main() {
@@ -186,15 +224,19 @@ async function main() {
     default: 27,
     help: "Number of samples",
   });
+  parser.add_argument("--cache-hit-ratio", {
+    action: "store_true",
+    help: "Whether to report cache hit ratio",
+  });
 
   const args: ParsedArguments = parser.parse_args();
 
   if (args.command === "execute-test-sync") {
-    runExecuteTestSync()
+    runExecuteTestSync(args.cache_hit_ratio)
   } else if (args.command === "execute-test-async") {
-      await runExecuteTestAsync()
+      await runExecuteTestAsync(args.cache_hit_ratio)
   } else if (args.command === "benchmark") {
-    runBenchmark(args.count)
+    runBenchmark(args.count, args.cache_hit_ratio)
   } else {
     throw new Error(`Unknown command: ${args.command}`)
   }

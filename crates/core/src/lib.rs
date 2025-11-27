@@ -9,10 +9,67 @@ use revm::{
     primitives::{address, keccak256, Address, Bytes, TxKind, U256},
     state::AccountInfo,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestResult {
+    /// Execution time of the REVM transaction
+    pub duration_ns: f64,
+    /// CPU cache hit ratio of the REVM transaction
+    pub cache_hit_ratio: Option<f64>,
+}
+
+/// Execute a Solidity test with REVM and return the execution time as nanoseconds.
+pub fn execute_test(
+    test_artifact_path: &Path,
+    test_name: &str,
+    collect_cache_hit_ratio: bool,
+) -> Result<TestResult> {
+    let caller = address!("0100000000000000000000000000000000000000");
+    let deployed_code = load_test_contract_deployed_code(test_artifact_path)?;
+    let contract_address = address!("4200000000000000000000000000000000000000");
+
+    let selector = compute_selector(test_name);
+
+    let db = create_db(contract_address, deployed_code)?;
+
+    // Create Context and build EVM
+    let ctx: Context<_, _, _, _, _, ()> = Context::mainnet().with_db(db);
+    let mut evm = ctx.build_mainnet();
+
+    let test_tx = build_tx(contract_address, selector, caller)?;
+
+    let mut perf_event_collector: Option<PerfEventCollector> = collect_cache_hit_ratio
+        .then(|| {
+            let mut pec = PerfEventCollector::new()?;
+            pec.enable()?;
+            Ok::<_, eyre::Error>(pec)
+        })
+        .transpose()?;
+
+    let start = Instant::now();
+    let test_result = evm.transact(test_tx)?;
+    let elapsed = start.elapsed();
+
+    let cache_hit_ratio = perf_event_collector
+        .as_mut()
+        .map(PerfEventCollector::cache_hit_ratio)
+        .transpose()?;
+
+    if !test_result.result.is_success() {
+        eyre::bail!("Test function reverted");
+    }
+
+    Ok(TestResult {
+        // Duration is expected to be <1m nanos so this is safe
+        duration_ns: elapsed.as_nanos() as f64,
+        cache_hit_ratio,
+    })
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,51 +127,47 @@ fn build_tx(contract_address: Address, selector: Bytes, caller: Address) -> Resu
     Ok(test_tx)
 }
 
-/// Execute a Solidity test with REVM and return the execution time as nanoseconds.
-pub fn execute_test(test_artifact_path: &Path, test_name: &str) -> Result<u128> {
-    let caller = address!("0100000000000000000000000000000000000000");
-    let deployed_code = load_test_contract_deployed_code(test_artifact_path)?;
-    let contract_address = address!("4200000000000000000000000000000000000000");
+struct PerfEventCollector {
+    group: perf_event::Group,
+    cache_references: perf_event::Counter,
+    cache_misses: perf_event::Counter,
+}
 
-    let selector = compute_selector(test_name);
+impl PerfEventCollector {
+    fn new() -> Result<Self> {
+        let mut group = perf_event::Group::new()?;
+        let cache_references = perf_event::Builder::new()
+            .observe_self()
+            .any_cpu()
+            .group(&mut group)
+            .kind(perf_event::events::Hardware::CACHE_REFERENCES)
+            .build()?;
+        let cache_misses = perf_event::Builder::new()
+            .observe_self()
+            .any_cpu()
+            .group(&mut group)
+            .kind(perf_event::events::Hardware::CACHE_MISSES)
+            .build()?;
 
-    let db = create_db(contract_address, deployed_code)?;
-
-    // Create Context and build EVM
-    let ctx: Context<_, _, _, _, _, ()> = Context::mainnet().with_db(db);
-    let mut evm = ctx.build_mainnet();
-
-    let test_tx = build_tx(contract_address, selector, caller)?;
-
-    let mut group = perf_event::Group::new()?;
-    let cache_refs = perf_event::Builder::new()
-        .observe_self()
-        .any_cpu()
-        .group(&mut group)
-        .kind(perf_event::events::Hardware::CACHE_REFERENCES)
-        .build()?;
-    let cache_misses = perf_event::Builder::new()
-        .observe_self()
-        .any_cpu()
-        .group(&mut group)
-        .kind(perf_event::events::Hardware::CACHE_MISSES)
-        .build()?;
-
-    group.enable()?;
-
-    let start = Instant::now();
-    let test_result = evm.transact(test_tx)?;
-    let elapsed = start.elapsed();
-
-    let counts = group.read()?;
-    let cache_hit_ratio = (counts[&cache_misses] as f64) / (counts[&cache_refs] as f64);
-    println!("cache hit ratio: {:.4}", cache_hit_ratio);
-
-    if !test_result.result.is_success() {
-        eyre::bail!("Test function reverted");
+        Ok(Self {
+            group,
+            cache_references,
+            cache_misses,
+        })
     }
 
-    Ok(elapsed.as_nanos())
+    fn enable(&mut self) -> Result<()> {
+        self.group.enable()?;
+        Ok(())
+    }
+
+    fn cache_hit_ratio(&mut self) -> Result<f64> {
+        self.group.disable()?;
+        let counts = self.group.read()?;
+        let cache_hit_ratio =
+            (counts[&self.cache_misses] as f64) / (counts[&self.cache_references] as f64);
+        Ok(cache_hit_ratio)
+    }
 }
 
 #[cfg(test)]
@@ -130,9 +183,10 @@ mod tests {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let artifact_path = manifest_dir.join(TEST_ARTIFACT);
 
-        let elapsed_ns = execute_test(artifact_path.as_path(), TEST_NAME)?;
+        let test_result = execute_test(artifact_path.as_path(), TEST_NAME, false)?;
 
-        assert!(elapsed_ns > 0);
+        assert!(test_result.duration_ns > 0.0);
+        assert!(test_result.cache_hit_ratio.is_none());
         Ok(())
     }
 }
