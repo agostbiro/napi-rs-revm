@@ -41,6 +41,7 @@
   },
   "scripts": {
     "artifacts": "napi artifacts --manifest-path crates/napi/Cargo.toml --output-dir .",
+    "prebench": "pnpm build",
     "bench": "node --import @oxc-node/core/register benchmark/bench.ts",
     "build": "napi build --platform --release --manifest-path crates/napi/Cargo.toml --output-dir .",
     "build:debug": "napi build --platform --manifest-path crates/napi/Cargo.toml --output-dir .",
