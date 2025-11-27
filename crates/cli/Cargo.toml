@@ -12,3 +12,4 @@ path = "src/main.rs"
 napi-rs-revm-core = { path = "../core" }
 eyre = "0.6.12"
 clap = { version = "4.5", features = ["derive"] }
+tokio.workspace = true

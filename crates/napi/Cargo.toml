@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 napi = { version = "3.0.0", features = ["async", "error_anyhow", "napi8", "serde-json"] }
 napi-derive = "3.0.0"
 napi-rs-revm-core = { path = "../core" }
-tokio = "1.48.0"
+tokio.workspace = true
 
 [build-dependencies]
 napi-build = "2"

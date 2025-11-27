@@ -78,9 +78,10 @@ function runExecuteTestAsyncInSubprocess() {
   return runInSubprocess(process.argv[0], args);
 }
 
-function runCargoInSubProcess() {
+function runCargoInSubProcess(sync: boolean) {
+  const command = `execute-test-${sync ? "" : "a"}sync`
   const args = [
-    "run", "--quiet", "--bin", "execute_test", "--release"
+    "run", "--quiet", "--bin", "execute_test", "--release", "--", command
   ];
 
   return runInSubprocess("cargo", args);
@@ -143,19 +144,30 @@ function runBenchmark(runs: number) {
   const nodeAsyncStats = calculateStatistics(nodeAsyncTimes);
   reportStatistics(nodeAsyncStats);
 
-  const rustTimes = []
+  const rustSyncTimes = []
   for (let i = 0; i < runs; i++) {
-    const elapsed = runCargoInSubProcess();
-    rustTimes.push(elapsed);
+    const elapsed = runCargoInSubProcess(/* sync */ true);
+    rustSyncTimes.push(elapsed);
   }
 
-  console.log("=== Rust Stats ===")
-  const rustStats = calculateStatistics(rustTimes);
-  reportStatistics(rustStats);
+  console.log("=== Rust Sync Stats ===")
+  const rustSyncStats = calculateStatistics(rustSyncTimes);
+  reportStatistics(rustSyncStats);
+
+  const rustAsyncTimes = []
+  for (let i = 0; i < runs; i++) {
+    const elapsed = runCargoInSubProcess(/* sync */ false);
+    rustAsyncTimes.push(elapsed);
+  }
+
+  console.log("=== Rust Async Stats ===")
+  const rustAsyncStats = calculateStatistics(rustAsyncTimes);
+  reportStatistics(rustAsyncStats);
 
   console.log("=== Comparison ===")
-  console.log("Node Sync/Rust median:", Math.round(10000 * nodeSyncStats.median / rustStats.median) / 100, "%")
-  console.log("Node Async/Rust median:", Math.round(10000 * nodeAsyncStats.median / rustStats.median) / 100, "%")
+  console.log("Node Sync/Rust Sync median:", Math.round(10000 * nodeSyncStats.median / rustSyncStats.median) / 100, "%")
+  console.log("Node Async/Rust Sync median:", Math.round(10000 * nodeAsyncStats.median / rustSyncStats.median) / 100, "%")
+  console.log("Rust Async/Rust Sync median:", Math.round(10000 * rustAsyncStats.median / rustSyncStats.median) / 100, "%")
 }
 
 async function main() {
