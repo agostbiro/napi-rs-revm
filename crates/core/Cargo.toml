@@ -6,6 +6,7 @@ edition.workspace = true
 
 [dependencies]
 eyre = "0.6.12"
+perf-event = "0.4.8"
 revm = "33.1.0"
 serde = "1.0"
 serde_json = "1.0"

@@ -86,9 +86,29 @@ pub fn execute_test(test_artifact_path: &Path, test_name: &str) -> Result<u128> 
 
     let test_tx = build_tx(contract_address, selector, caller)?;
 
+    let mut group = perf_event::Group::new()?;
+    let cache_refs = perf_event::Builder::new()
+        .observe_self()
+        .any_cpu()
+        .group(&mut group)
+        .kind(perf_event::events::Hardware::CACHE_REFERENCES)
+        .build()?;
+    let cache_misses = perf_event::Builder::new()
+        .observe_self()
+        .any_cpu()
+        .group(&mut group)
+        .kind(perf_event::events::Hardware::CACHE_MISSES)
+        .build()?;
+
+    group.enable()?;
+
     let start = Instant::now();
     let test_result = evm.transact(test_tx)?;
     let elapsed = start.elapsed();
+
+    let counts = group.read()?;
+    let cache_hit_ratio = (counts[&cache_misses] as f64) / (counts[&cache_refs] as f64);
+    println!("cache hit ratio: {:.4}", cache_hit_ratio);
 
     if !test_result.result.is_success() {
         eyre::bail!("Test function reverted");
