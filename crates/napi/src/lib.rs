@@ -5,7 +5,7 @@ use napi_derive::napi;
 use napi::bindgen_prelude::{BigInt};
 
 /// Node.js wrapper around the core `execute_test` function
-#[napi]
+#[napi(catch_unwind)]
 pub fn execute_test(test_artifact_path: String, test_name: String) -> napi::Result<BigInt> {
     let test_artifact_path = Path::new(&test_artifact_path);
 
