@@ -1,27 +1,28 @@
 #![deny(clippy::all)]
 
+// Using core::intrinsics (nightly only)
+// #![feature(core_intrinsics)]
+// use core::intrinsics::prefetch_read_instruction;
+
 use eyre::{eyre, Result};
-use revm::{
-    bytecode::Bytecode,
-    context::{Context, TxEnv},
-    database::InMemoryDB,
-    handler::{ExecuteEvm, MainBuilder, MainContext},
-    primitives::{address, keccak256, Address, Bytes, TxKind, U256},
-    state::AccountInfo,
-};
+use num_traits::FromPrimitive;
+use perf_event::events as perf_events;
+use revm::{bytecode::Bytecode, context::{BlockEnv, CfgEnv, Context, TxEnv}, database::InMemoryDB, handler::{ExecuteEvm, MainBuilder, MainContext}, primitives::{address, keccak256, Address, Bytes, TxKind, U256}, state::AccountInfo, Journal, MainnetEvm};
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::Path;
-use std::time::Instant;
+use std::{fs, path::Path, time::Instant};
+use revm::context::result::ExecutionResult;
+use revm::context_interface::result::ExecResultAndState;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestResult {
     /// Execution time of the REVM transaction
     pub duration_ns: f64,
-    /// CPU cache hit ratio of the REVM transaction
-    pub cache_hit_ratio: Option<f64>,
+    /// Optional report generated from perf events.
+    pub perf_report: Option<PerfReport>,
 }
+
+type TestContext = Context<BlockEnv, TxEnv, CfgEnv, InMemoryDB, Journal<InMemoryDB>, ()>;
 
 /// Execute a Solidity test with REVM and return the execution time as nanoseconds.
 pub fn execute_test(
@@ -38,10 +39,13 @@ pub fn execute_test(
     let db = create_db(contract_address, deployed_code)?;
 
     // Create Context and build EVM
-    let ctx: Context<_, _, _, _, _, ()> = Context::mainnet().with_db(db);
+    let ctx: TestContext = Context::mainnet().with_db(db);
     let mut evm = ctx.build_mainnet();
 
     let test_tx = build_tx(contract_address, selector, caller)?;
+
+    // Prefetch REVM transact code (which is heavily inlined) with max locality.
+    // unsafe { prefetch_read_instruction::<_, 3>(MainnetEvm::<TestContext>::transact as *const u8); }
 
     let mut perf_event_collector: Option<PerfEventCollector> = collect_cache_hit_ratio
         .then(|| {
@@ -52,12 +56,12 @@ pub fn execute_test(
         .transpose()?;
 
     let start = Instant::now();
-    let test_result = evm.transact(test_tx)?;
+    let test_result = execute_test_transact(&mut evm, test_tx)?;
     let elapsed = start.elapsed();
 
-    let cache_hit_ratio = perf_event_collector
+    let perf_report = perf_event_collector
         .as_mut()
-        .map(PerfEventCollector::cache_hit_ratio)
+        .map(PerfEventCollector::report)
         .transpose()?;
 
     if !test_result.result.is_success() {
@@ -67,8 +71,13 @@ pub fn execute_test(
     Ok(TestResult {
         // Duration is expected to be <1m nanos so this is safe
         duration_ns: elapsed.as_nanos() as f64,
-        cache_hit_ratio,
+        perf_report,
     })
+}
+
+#[inline(never)]
+fn execute_test_transact(evm: &mut MainnetEvm<TestContext>, test_tx: TxEnv) -> Result<ExecResultAndState<ExecutionResult>> {
+    Ok(evm.transact(test_tx)?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,30 +138,72 @@ fn build_tx(contract_address: Address, selector: Bytes, caller: Address) -> Resu
 
 struct PerfEventCollector {
     group: perf_event::Group,
-    cache_references: perf_event::Counter,
-    cache_misses: perf_event::Counter,
+    cycles: perf_event::Counter,
+    instructions: perf_event::Counter,
+    // last_level_cache_references: perf_event::Counter,
+    // last_level_cache_misses: perf_event::Counter,
+    // l1_data_cache_reads: perf_event::Counter,
+    // l1_data_cache_misses: perf_event::Counter,
+    // l1 instruction cache reads are not exposed on Intel
+    l1_instruction_cache_misses: perf_event::Counter,
+    // branch_instructions: perf_event::Counter,
+    // branch_misses: perf_event::Counter,
+    cpu_migrations: perf_event::Counter,
 }
 
 impl PerfEventCollector {
     fn new() -> Result<Self> {
         let mut group = perf_event::Group::new()?;
-        let cache_references = perf_event::Builder::new()
-            .observe_self()
-            .any_cpu()
-            .group(&mut group)
-            .kind(perf_event::events::Hardware::CACHE_REFERENCES)
-            .build()?;
-        let cache_misses = perf_event::Builder::new()
-            .observe_self()
-            .any_cpu()
-            .group(&mut group)
-            .kind(perf_event::events::Hardware::CACHE_MISSES)
-            .build()?;
+
+        // let current_cpu = unsafe {
+        //     libc::sched_getcpu()
+        // }.to_usize().ok_or_else(|| eyre::eyre!("Failed to convert c_int to usize"))?;
+
+        macro_rules! perf_event {
+            ($kind:expr) => {
+                perf_event::Builder::new()
+                    // .one_cpu(current_cpu)
+                    .group(&mut group)
+                    .kind($kind)
+                    .build()?
+            };
+        }
+
+        let cycles = perf_event!(perf_events::Hardware::CPU_CYCLES);
+        let instructions = perf_event!(perf_events::Hardware::INSTRUCTIONS);
+        // let last_level_cache_references = perf_event!(perf_events::Hardware::CACHE_REFERENCES);
+        // let last_level_cache_misses = perf_event!(perf_events::Hardware::CACHE_MISSES);
+        // let l1_data_cache_reads = perf_event!(perf_events::Cache {
+        //     which: perf_events::WhichCache::L1D,
+        //     operation: perf_events::CacheOp::READ,
+        //     result: perf_events::CacheResult::ACCESS,
+        // });
+        // let l1_data_cache_misses = perf_event!(perf_events::Cache {
+        //         which: perf_events::WhichCache::L1D,
+        //         operation: perf_events::CacheOp::READ,
+        //         result: perf_events::CacheResult::MISS,
+        //     });
+        let l1_instruction_cache_misses = perf_event!(perf_events::Cache {
+            which: perf_events::WhichCache::L1I,
+            operation: perf_events::CacheOp::READ,
+            result: perf_events::CacheResult::MISS,
+        });
+        // let branch_instructions = perf_event!(perf_events::Hardware::BRANCH_INSTRUCTIONS);
+        // let branch_misses = perf_event!(perf_events::Hardware::BRANCH_MISSES);
+        let cpu_migrations = perf_event!(perf_events::Software::CPU_MIGRATIONS);
 
         Ok(Self {
             group,
-            cache_references,
-            cache_misses,
+            cycles,
+            instructions,
+            // last_level_cache_references,
+            // last_level_cache_misses,
+            // l1_data_cache_reads,
+            // l1_data_cache_misses,
+            l1_instruction_cache_misses,
+            // branch_instructions,
+            // branch_misses,
+            cpu_migrations,
         })
     }
 
@@ -161,13 +212,52 @@ impl PerfEventCollector {
         Ok(())
     }
 
-    fn cache_hit_ratio(&mut self) -> Result<f64> {
+    fn report(&mut self) -> Result<PerfReport> {
         self.group.disable()?;
         let counts = self.group.read()?;
-        let cache_hit_ratio =
-            (counts[&self.cache_misses] as f64) / (counts[&self.cache_references] as f64);
-        Ok(cache_hit_ratio)
+
+        macro_rules! count_to_f64 {
+            ($counter:expr) => {
+                f64::from_u64(counts[$counter])
+                    .ok_or_else(|| eyre!("Failed to convert u64 to f64"))?
+            };
+        }
+
+        macro_rules! ratio {
+            ($nominator:expr, $denominator:expr) => {{
+                let nominator = count_to_f64!($nominator);
+                let denominator = count_to_f64!($denominator);
+                nominator / denominator
+            }};
+        }
+
+        Ok(PerfReport {
+            instructions: count_to_f64!(&self.instructions),
+            instructions_per_cycle: ratio!(&self.instructions, &self.cycles),
+            // instructions: -1.,
+            // instructions_per_cycle: -1.,
+            // last_level_cache_hit_rate: 1.0 - ratio!(&self.last_level_cache_misses, &self.last_level_cache_references),
+            // l1_data_cache_hit_rate: 1.0 - ratio!(&self.l1_data_cache_misses, &self.l1_data_cache_reads),
+            last_level_cache_hit_rate: -1.,
+            l1_data_cache_hit_rate: -1.,
+            l1_instruction_cache_misses: count_to_f64!(&self.l1_instruction_cache_misses),
+            // branch_miss_ratio: ratio!(&self.branch_misses, &self.branch_instructions),
+            branch_miss_ratio: -1.,
+            cpu_migrations: count_to_f64!(&self.cpu_migrations),
+        })
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerfReport {
+    pub instructions: f64,
+    pub instructions_per_cycle: f64,
+    pub last_level_cache_hit_rate: f64,
+    pub l1_data_cache_hit_rate: f64,
+    pub l1_instruction_cache_misses: f64,
+    pub branch_miss_ratio: f64,
+    pub cpu_migrations: f64,
 }
 
 #[cfg(test)]
@@ -186,7 +276,7 @@ mod tests {
         let test_result = execute_test(artifact_path.as_path(), TEST_NAME, false)?;
 
         assert!(test_result.duration_ns > 0.0);
-        assert!(test_result.cache_hit_ratio.is_none());
+        assert!(test_result.perf_report.is_none());
         Ok(())
     }
 }
