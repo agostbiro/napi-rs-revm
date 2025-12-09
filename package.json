@@ -109,6 +109,7 @@
   },
   "packageManager": "pnpm@9.15.0",
   "dependencies": {
-    "argparse": "^2.0.1"
+    "argparse": "^2.0.1",
+    "csv-stringify": "^6.6.0"
   }
 }
