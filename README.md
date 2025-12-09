@@ -6,13 +6,17 @@ Instructions on how to get detailed performance measurements are below.
 
 ## Prerequisites
 
-- `Rust` toolchain
-- `Node 24` 
-- `pnpm`
+- x86 Linux
+- Rust toolchain
+- Node 24 
+- pnpm
 
 ## Run
 
 ```
+# Assuming you're running this in an isolated environment, otherwise this is dangerous.
+sudo sysctl -w kernel.perf_event_paranoid=3
+
 pnpm i
 pnpm run bench benchmark
 ```
